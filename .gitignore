@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.env
+data/
+n8n_data/
+google-credentials.json
+*.code-workspace
