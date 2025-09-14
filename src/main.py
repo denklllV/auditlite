@@ -4,6 +4,7 @@
 import sys
 import os
 import io
+import json # Импортируем JSON для сохранения артефактов
 from pathlib import Path
 from dotenv import load_dotenv
 from googleapiclient.http import MediaIoBaseDownload
@@ -13,7 +14,6 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.append(str(project_root))
 
 from src.utils.google_clients import get_google_clients
-# Импортируем наш парсер, он скоро понадобится
 from src.parsers.pdf_parser import extract_text_from_pdf
 
 # --- Загрузка переменных окружения ---
@@ -21,27 +21,18 @@ load_dotenv()
 SHEET_NAME = os.getenv("SHEET_NAME")
 SHEET_WORKSHEET_NAME = os.getenv("SHEET_WORKSHEET_NAME")
 
-# --- Новые функции ---
-
 def download_file_from_drive(drive_service: "Resource", file_id: str, save_path: Path) -> bool:
-    """
-    Скачивает файл из Google Drive по его ID и сохраняет локально.
-    """
+    """ Скачивает файл из Google Drive по его ID и сохраняет локально. """
     try:
         print(f"⬇️  Начинаю скачивание файла с ID: {file_id}")
         request = drive_service.files().get_media(fileId=file_id)
-        
-        # Убедимся, что директория для сохранения существует
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        
         fh = io.FileIO(save_path, 'wb')
         downloader = MediaIoBaseDownload(fh, request)
-        
         done = False
         while not done:
             status, done = downloader.next_chunk()
             print(f"  > Прогресс скачивания: {int(status.progress() * 100)}%")
-            
         print(f"✅ Файл успешно скачан и сохранен в: {save_path}")
         return True
     except Exception as e:
@@ -49,11 +40,8 @@ def download_file_from_drive(drive_service: "Resource", file_id: str, save_path:
         return False
 
 def update_task_status(worksheet: "gspread.Worksheet", row_index: int, new_status: str):
-    """
-    Обновляет статус задачи в указанной строке.
-    """
+    """ Обновляет статус задачи в указанной строке. """
     try:
-        # Находим нужную колонку по имени 'Status'
         status_col = worksheet.find('Status').col
         worksheet.update_cell(row_index, status_col, new_status)
         print(f"🔄 Статус в строке {row_index} обновлен на '{new_status}'")
@@ -61,9 +49,7 @@ def update_task_status(worksheet: "gspread.Worksheet", row_index: int, new_statu
         print(f"❌ Ошибка при обновлении статуса: {e}")
 
 def find_next_task(worksheet: "gspread.Worksheet") -> dict | None:
-    """
-    Находит первую строку со статусом 'new' и возвращает ее как словарь.
-    """
+    """ Находит первую строку со статусом 'new' и возвращает ее как словарь. """
     all_records = worksheet.get_all_records()
     for index, row in enumerate(all_records):
         if row.get("Status") == 'new':
@@ -74,11 +60,8 @@ def find_next_task(worksheet: "gspread.Worksheet") -> dict | None:
     return None
 
 def main():
-    """
-    Главная функция-оркестратор.
-    """
+    """ Главная функция-оркестратор. """
     print("🚀 Запуск AuditLite Python Worker...")
-    
     try:
         gs_client, drive_service = get_google_clients()
         spreadsheet = gs_client.open(SHEET_NAME)
@@ -90,8 +73,6 @@ def main():
             print("🏁 Работа завершена.")
             return
 
-        # --- ОБНОВЛЕННАЯ ЛОГИКА ---
-        
         row_idx = task['row_index']
         file_id = task.get('FileID')
         
@@ -100,24 +81,43 @@ def main():
             update_task_status(worksheet, row_idx, 'error_no_file_id')
             return
 
-        # 1. Обновляем статус, чтобы другие обработчики не взяли эту задачу
         update_task_status(worksheet, row_idx, 'processing')
 
-        # 2. Скачиваем файл
-        file_name = task.get('FileName', f"{file_id}.pdf") # Используем имя файла или ID
+        file_name = task.get('FileName', f"{file_id}.pdf")
         local_pdf_path = project_root / 'data' / 'artifacts' / file_name
         
-        download_successful = download_file_from_drive(drive_service, file_id, local_pdf_path)
-
-        if not download_successful:
+        if not download_file_from_drive(drive_service, file_id, local_pdf_path):
             update_task_status(worksheet, row_idx, 'error_download_failed')
             return
             
-        # 3. TODO: Вызвать парсер (следующий шаг)
-        print(f"下一步: Вызвать парсер для файла {local_pdf_path}")
+        # --- НОВАЯ ЛОГИКА ЗДЕСЬ ---
+        # 3. Вызываем парсер для скачанного файла
+        print(f"🔍 Начинаю извлечение текста из {local_pdf_path}...")
+        extracted_text = extract_text_from_pdf(local_pdf_path)
         
-        # 4. Финальное обновление статуса
-        update_task_status(worksheet, row_idx, 'processed_text_extracted') # Временный статус
+        # 4. Создаем и сохраняем JSON-артефакт
+        # Имя артефакта будет таким же, как у PDF, но с расширением .json
+        artifact_path = local_pdf_path.with_suffix('.json')
+        
+        # Структурируем данные для JSON
+        artifact_data = {
+            "case_id": file_id, # Используем FileID как уникальный идентификатор кейса
+            "source_file": file_name,
+            "raw_text": extracted_text
+        }
+        
+        try:
+            with open(artifact_path, 'w', encoding='utf-8') as f:
+                json.dump(artifact_data, f, ensure_ascii=False, indent=4)
+            print(f"📝 Артефакт с извлеченным текстом сохранен: {artifact_path}")
+        except Exception as e:
+            print(f"❌ Ошибка при сохранении JSON-артефакта: {e}")
+            update_task_status(worksheet, row_idx, 'error_artifact_save_failed')
+            return
+
+        # 5. Финальное обновление статуса
+        update_task_status(worksheet, row_idx, 'text_extracted')
+        print("✅ Этап 2 успешно завершен.")
         
     except Exception as e:
         print(f"❌ Произошла критическая ошибка: {e}")
