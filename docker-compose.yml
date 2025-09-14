@@ -1,0 +1,21 @@
+# docker-compose.yml
+# Имя файла: docker-compose.yml
+
+version: '3.7'
+
+services:
+  n8n:
+    image: n8nio/n8n
+    restart: always
+    ports:
+      # Открываем доступ к n8n через порт 5678 на вашем ПК
+      - "5678:5678"
+    environment:
+      # Устанавливаем часовой пояс, чтобы расписания (cron) работали корректно
+      - TZ=Europe/Moscow
+    volumes:
+      # Связываем локальную папку с внутренней папкой контейнера
+      # ВСЕ ДАННЫЕ N8N БУДУТ СОХРАНЯТЬСЯ ЗДЕСЬ
+      - ./n8n_data:/home/node/.n8n
+
+# Конец файла: docker-compose.yml
